@@ -64,7 +64,7 @@ onUiLoaded(async() => {
         targetElement.style.transformOrigin = "0 0";
 
         elemData[elemId] = {
-            zoom: 1,
+            zoomLevel: 1,
             panX: 0,
             panY: 0
         };
@@ -145,6 +145,57 @@ onUiLoaded(async() => {
         if (hotkeysConfig.canvas_show_tooltip) {
             createTooltip();
         }
+
+        // Visible toolbar with the most-used mask-painting actions, so the
+        // zoom / fullscreen / brush controls are clickable instead of
+        // hotkey-only. Re-created if Gradio re-renders the container.
+        function createToolbar() {
+            const container = targetElement.querySelector(".image-container");
+            if (!container || container.querySelector(":scope > .mask-toolbar")) {
+                return;
+            }
+
+            function zoomAtCenter(operation) {
+                const rect = targetElement.getBoundingClientRect();
+                doZoom(operation, rect.left + rect.width / 2, rect.top + rect.height / 2);
+            }
+
+            function clickNative(ariaLabel) {
+                const btn = targetElement.querySelector(`button[aria-label="${ariaLabel}"]`);
+                if (btn) btn.click();
+            }
+
+            const buttons = [
+                { label: "+", title: "Zoom in (Shift + wheel)", onClick: () => zoomAtCenter("+") },
+                { label: "\u2212", title: "Zoom out (Shift + wheel)", onClick: () => zoomAtCenter("-") },
+                { label: "\u26F6", title: "Fullscreen (S)", onClick: () => fitToScreen() },
+                { label: "\u27F2", title: "Reset view (R)", onClick: () => resetZoom() },
+                { label: "B+", title: "Bigger brush (Ctrl + wheel)", onClick: () => adjustBrushSize(elemId, -120) },
+                { label: "B\u2212", title: "Smaller brush (Ctrl + wheel)", onClick: () => adjustBrushSize(elemId, 120) },
+                { label: "\u21A9", title: "Undo last stroke (Ctrl + Z)", onClick: () => clickNative("Undo") },
+                { label: "\u232B", title: "Clear mask", onClick: () => clickNative("Clear") },
+            ];
+
+            const toolbar = document.createElement("div");
+            toolbar.className = "mask-toolbar";
+
+            for (const { label, title, onClick } of buttons) {
+                const btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "mask-toolbar-btn";
+                btn.textContent = label;
+                btn.title = title;
+                btn.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    onClick();
+                });
+                toolbar.appendChild(btn);
+            }
+
+            container.appendChild(toolbar);
+        }
+
+        createToolbar();
 
         // Reset the zoom level and pan position of the target element to their initial values
         function resetZoom() {
@@ -257,32 +308,37 @@ onUiLoaded(async() => {
             return newZoomLevel;
         }
 
+        // Zoom centered on a client (screen) point. Used by both the
+        // Shift+wheel hotkey and the toolbar buttons.
+        function doZoom(operation, clientX, clientY) {
+            let zoomPosX, zoomPosY;
+            let delta = 0.2;
+
+            if (elemData[elemId].zoomLevel > 7) {
+                delta = 0.9;
+            } else if (elemData[elemId].zoomLevel > 2) {
+                delta = 0.6;
+            }
+
+            zoomPosX = clientX;
+            zoomPosY = clientY;
+
+            fullScreenMode = false;
+            elemData[elemId].zoomLevel = updateZoom(
+                elemData[elemId].zoomLevel +
+                (operation === "+" ? delta : -delta),
+                zoomPosX - targetElement.getBoundingClientRect().left,
+                zoomPosY - targetElement.getBoundingClientRect().top
+            );
+
+            targetElement.isZoomed = true;
+        }
+
         // Change the zoom level based on user interaction
         function changeZoomLevel(operation, e) {
             if (isModifierKey(e, hotkeysConfig.canvas_hotkey_zoom)) {
                 e.preventDefault();
-
-                let zoomPosX, zoomPosY;
-                let delta = 0.2;
-
-                if (elemData[elemId].zoomLevel > 7) {
-                    delta = 0.9;
-                } else if (elemData[elemId].zoomLevel > 2) {
-                    delta = 0.6;
-                }
-
-                zoomPosX = e.clientX;
-                zoomPosY = e.clientY;
-
-                fullScreenMode = false;
-                elemData[elemId].zoomLevel = updateZoom(
-                    elemData[elemId].zoomLevel +
-                    (operation === "+" ? delta : -delta),
-                    zoomPosX - targetElement.getBoundingClientRect().left,
-                    zoomPosY - targetElement.getBoundingClientRect().top
-                );
-
-                targetElement.isZoomed = true;
+                doZoom(operation, e.clientX, e.clientY);
             }
         }
 
@@ -495,6 +551,7 @@ onUiLoaded(async() => {
                 mutation.target.tagName.toLowerCase() === 'canvas') {
                 targetElement.isExpanded = false;
                 setTimeout(resetZoom, 10);
+                setTimeout(createToolbar, 50);
               }
             }
           });

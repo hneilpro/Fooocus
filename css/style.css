@@ -416,3 +416,42 @@ div:has(> #positive_prompt) {
 #inpaint_brush_color input[type=color]{
   background: none;
 }
+/* ---- Inpaint mask editor toolbar (clickable zoom / fullscreen / brush controls) ---- */
+#inpaint_canvas .image-container,
+#inpaint_mask_canvas .image-container {
+  position: relative;
+}
+
+.mask-toolbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 120;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(20, 20, 20, 0.55);
+  border-radius: 8px;
+}
+
+.mask-toolbar-btn {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.mask-toolbar-btn:hover {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.mask-toolbar-btn:active {
+  background: rgba(255, 255, 255, 0.45);
+}
