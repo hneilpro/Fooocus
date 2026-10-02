@@ -179,6 +179,38 @@ onUiLoaded(async() => {
             const toolbar = document.createElement("div");
             toolbar.className = "mask-toolbar";
 
+            // Second pen: eraser that deselects painted mask area while
+            // drawing. Gradio 3.41.2's sketch tool is additive-only and hides
+            // its color picker in mask mode, so the eraser is implemented in
+            // ensureMaskFx() at the canvas composite level; these buttons just
+            // switch that mode. Kept first in the toolbar: the most-used pair.
+            function makeModeButton(glyph, title, ariaLabel) {
+                const btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "mask-toolbar-btn mask-toolbar-mode";
+                btn.textContent = glyph;
+                btn.title = title;
+                btn.setAttribute("aria-label", ariaLabel);
+                btn.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    const fx = ensureMaskFx();
+                    if (fx) fx.setMode(ariaLabel === "Fooocus eraser pen" ? "eraser" : "pen");
+                    syncFxButtons();
+                });
+                return btn;
+            }
+
+            const penBtn = makeModeButton("\u270F\uFE0F", "Pen: paint the mask", "Fooocus paint pen");
+            const eraserBtn = makeModeButton("\uD83E\uDDFD", "Eraser: deselect painted mask area", "Fooocus eraser pen");
+            targetElement._maskFxBtnRefs = { penBtn, eraserBtn };
+
+            toolbar.appendChild(penBtn);
+            toolbar.appendChild(eraserBtn);
+
+            const sep = document.createElement("div");
+            sep.className = "mask-toolbar-sep";
+            toolbar.appendChild(sep);
+
             for (const { label, title, onClick } of buttons) {
                 const btn = document.createElement("button");
                 btn.type = "button";
@@ -196,6 +228,163 @@ onUiLoaded(async() => {
         }
 
         createToolbar();
+
+        // ---- Eraser pen: deselect painted mask area while drawing ----
+        //
+        // Gradio 3.41.2's sketch tool (mask mode) is additive-only: strokes go
+        // into an internal `lines` array, the mask is the pixels of
+        // canvas[key="mask"], and the brush-color picker is not rendered in
+        // mask mode. Instead of fighting that pipeline, the eraser works one
+        // level down: every stroke Gradio draws passes through
+        // CanvasRenderingContext2D.stroke() on the mask canvas, so wrapping
+        // that method lets eraser strokes render with
+        // globalCompositeOperation='destination-out' (erase) while paint
+        // strokes use 'source-over'. Undo/clear keep working because they
+        // replay the same wrapped path, and the component's own change
+        // dispatch still ships the true mask pixels to the backend (whose
+        // channel-0 threshold treats erased/transparent as deselected).
+        //
+        // The per-stroke journal mirrors Gradio's internal `lines` array so a
+        // replay (undo) draws every stroke with its own composite even when
+        // paint and eraser strokes are mixed. Journal sync points, all
+        // verified against the Gradio 3.41.2 frontend source (Sketch.svelte,
+        // Image.svelte, ModifySketch.svelte):
+        //  - every finished stroke ends with saveLine() + save_mask_line(),
+        //    each calling trigger_on_change() -> canvas.mask.toDataURL()
+        //    (one journal entry pushed on the first of the two calls);
+        //  - native Undo -> sketch.undo() -> redraw_image() -> clear_canvas()
+        //    -> ctx.mask.clearRect(), then one draw_points() (== one
+        //    stroke()) per remaining line, then trigger_on_change();
+        //  - native Clear -> sketch.clear_mask() -> redraw_image([]) ->
+        //    clear_canvas() -> ctx.mask.clearRect(), then trigger_on_change();
+        //  - the native Undo/Clear clicks are observed in the capture phase
+        //    so the journal pop/reset below happens before Gradio's
+        //    synchronous replay runs.
+        //  - clear_canvas() is ALSO called by clear(), which does NOT end
+        //    with toDataURL() (mount, new image upload, value removed,
+        //    resize). Those calls reset the journal; a replay armed by such
+        //    a clearRect() is disarmed by the first stroke that finds the
+        //    journal exhausted, so it is correctly treated as a live stroke.
+        function ensureMaskFx() {
+            const maskCanvas = targetElement.querySelector('canvas[key="mask"]');
+            if (!maskCanvas) return null;
+            if (maskCanvas.__fooocusFx) return maskCanvas.__fooocusFx;
+
+            const ifaceCanvas = targetElement.querySelector('canvas[key="interface"]');
+            const mctx = maskCanvas.getContext("2d");
+            const fx = {
+                mode: "pen",
+                journal: [],
+                replaying: false,
+                replayIdx: 0,
+                pendingPop: false,
+                pendingClear: false,
+                liveStroke: false,
+                liveEraser: false,
+            };
+
+            const origStroke = mctx.stroke.bind(mctx);
+            const origClearRect = mctx.clearRect.bind(mctx);
+            const origToDataURL = maskCanvas.toDataURL.bind(maskCanvas);
+
+            mctx.stroke = function () {
+                if (fx.replaying && fx.replayIdx < fx.journal.length) {
+                    // Genuine replay (undo/clear_mask): consume the matching
+                    // journal entry so the stroke redraws with its own
+                    // composite (eraser strokes re-erase).
+                    const entry = fx.journal[fx.replayIdx++];
+                    mctx.globalCompositeOperation =
+                        entry.eraser ? "destination-out" : "source-over";
+                } else {
+                    // Live stroke. This branch also disarms a replay that was
+                    // armed by a clearRect() Gradio never followed with
+                    // strokes (clear() on mount / new image / resize resets
+                    // the journal, so an exhausted journal means "not a
+                    // replay").
+                    fx.replaying = false;
+                    const isEraser = fx.mode === "eraser";
+                    mctx.globalCompositeOperation = isEraser ? "destination-out" : "source-over";
+                    fx.liveStroke = true;
+                    fx.liveEraser = isEraser;
+                }
+                return origStroke();
+            };
+
+            mctx.clearRect = function (x, y, w, h) {
+                const result = origClearRect(x, y, w, h);
+                if (fx.pendingPop) {
+                    fx.journal.pop();
+                    fx.pendingPop = false;
+                } else if (fx.pendingClear) {
+                    fx.journal = [];
+                    fx.pendingClear = false;
+                } else {
+                    fx.journal = [];
+                }
+                fx.replaying = true;
+                fx.replayIdx = 0;
+                fx.liveStroke = false;
+                return result;
+            };
+
+            maskCanvas.toDataURL = function (...args) {
+                if (fx.replaying) {
+                    fx.replaying = false;
+                } else if (fx.liveStroke) {
+                    fx.journal.push({ eraser: fx.liveEraser });
+                    fx.liveStroke = false;
+                }
+                mctx.globalCompositeOperation =
+                    fx.mode === "eraser" ? "destination-out" : "source-over";
+                return origToDataURL(...args);
+            };
+
+            fx.setMode = function (mode) {
+                fx.mode = mode;
+                // The interface canvas only ever shows the brush-preview
+                // cursor, so inverting it turns the white preview ring black
+                // in eraser mode: an honest cursor without extra elements.
+                if (ifaceCanvas) ifaceCanvas.style.filter = mode === "eraser" ? "invert(1)" : "";
+                syncFxButtons();
+            };
+
+            maskCanvas.__fooocusFx = fx;
+            fx.setMode("pen");
+            return fx;
+        }
+
+        function syncFxButtons() {
+            const refs = targetElement._maskFxBtnRefs;
+            if (!refs) return;
+            const maskCanvas = targetElement.querySelector('canvas[key="mask"]');
+            const fx = maskCanvas && maskCanvas.__fooocusFx;
+            const isEraser = !!fx && fx.mode === "eraser";
+            refs.penBtn.classList.toggle("active", !isEraser);
+            refs.eraserBtn.classList.toggle("active", isEraser);
+            refs.penBtn.setAttribute("aria-pressed", String(!isEraser));
+            refs.eraserBtn.setAttribute("aria-pressed", String(isEraser));
+        }
+
+        // One capture-phase click hook per canvas root: flags an observed
+        // native Undo/Clear click before Gradio's synchronous replay runs.
+        // Looks the fx state up live so canvas remounts (new uploads) work.
+        if (!targetElement.__fooocusFxClickHook) {
+            targetElement.__fooocusFxClickHook = true;
+            targetElement.addEventListener("click", (e) => {
+                const btn = e.target && e.target.closest
+                    ? e.target.closest('button[aria-label="Undo"],button[aria-label="Clear"]')
+                    : null;
+                if (!btn) return;
+                const maskCanvas = targetElement.querySelector('canvas[key="mask"]');
+                const fx = maskCanvas && maskCanvas.__fooocusFx;
+                if (!fx) return;
+                if (btn.getAttribute("aria-label") === "Undo") fx.pendingPop = true;
+                else fx.pendingClear = true;
+            }, true);
+        }
+
+        ensureMaskFx();
+        syncFxButtons();
 
         // Reset the zoom level and pan position of the target element to their initial values
         function resetZoom() {
@@ -552,6 +741,12 @@ onUiLoaded(async() => {
                 targetElement.isExpanded = false;
                 setTimeout(resetZoom, 10);
                 setTimeout(createToolbar, 50);
+              }
+              // Canvases can be recreated on component remounts: (re)install
+              // the eraser compositing hooks whenever the DOM changes.
+              if (mutation.type === 'childList') {
+                ensureMaskFx();
+                syncFxButtons();
               }
             }
           });

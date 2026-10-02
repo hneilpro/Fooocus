@@ -455,3 +455,15 @@ div:has(> #positive_prompt) {
 .mask-toolbar-btn:active {
   background: rgba(255, 255, 255, 0.45);
 }
+
+.mask-toolbar-btn.active {
+  background: rgba(255, 255, 255, 0.34);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.65);
+}
+
+.mask-toolbar-sep {
+  width: 1px;
+  align-self: stretch;
+  background: rgba(255, 255, 255, 0.25);
+  margin: 3px 4px;
+}
